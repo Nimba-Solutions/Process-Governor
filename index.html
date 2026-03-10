@@ -1,0 +1,853 @@
+<!--
+  @name         Process Governor
+  @license      BSL 1.1 — See LICENSE.md
+  @description  Dashboard UI — CPU/memory limiter per-app for Windows.
+  @author       Cloud Nimbus LLC
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Process Governor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #1a1510;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 16px 20px;
+      user-select: none;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .header h1 { font-size: 20px; font-weight: 600; color: #fff; }
+    .status-badge {
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status-active { background: #3b2a0a; color: #f59e0b; }
+    .status-idle { background: #1f2937; color: #6b7280; }
+    .header-right { display: flex; align-items: center; gap: 8px; }
+
+    /* System stats bar */
+    .stats-bar {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 14px;
+      padding: 10px 16px;
+      background: #1f1a12;
+      border: 1px solid #3b3020;
+      border-radius: 8px;
+    }
+    .stat-item { display: flex; align-items: center; gap: 8px; }
+    .stat-label { font-size: 11px; color: #8b7a60; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-value { font-size: 16px; font-weight: 700; color: #f5c842; font-family: monospace; }
+    .stat-value.warn { color: #ef4444; }
+    .stat-bar-bg {
+      width: 80px; height: 6px;
+      background: #2a2218;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .stat-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .stat-bar-fill.cpu { background: #f59e0b; }
+    .stat-bar-fill.mem { background: #8b5cf6; }
+
+    /* Buttons */
+    .btn {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .btn-primary { background: #b45309; color: #fff; }
+    .btn-primary:hover { background: #d97706; }
+    .btn-danger { background: #7f1d1d; color: #fca5a5; }
+    .btn-danger:hover { background: #991b1b; }
+    .btn-ghost { background: transparent; color: #9ca3af; border: 1px solid #374151; }
+    .btn-ghost:hover { background: #1f2937; color: #fff; }
+    .btn-success { background: #065f46; color: #6ee7b7; }
+    .btn-success:hover { background: #047857; }
+    .btn-icon {
+      width: 30px; height: 30px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px; border: none; cursor: pointer;
+      background: transparent; color: #9ca3af; font-size: 16px;
+    }
+    .btn-icon:hover { background: #2a2218; color: #fff; }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 2px;
+      margin-bottom: 14px;
+      background: #1f1a12;
+      border-radius: 8px;
+      padding: 3px;
+      width: fit-content;
+    }
+    .tab {
+      padding: 6px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      color: #8b7a60;
+      border: none;
+      background: transparent;
+      transition: all 0.15s;
+    }
+    .tab:hover { color: #d1c4a0; }
+    .tab.active { background: #b45309; color: #fff; }
+
+    /* Panels */
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    /* Presets */
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .preset-card {
+      background: #1f1a12;
+      border: 1px solid #3b3020;
+      border-radius: 8px;
+      padding: 14px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .preset-card:hover { border-color: #b45309; background: #2a2218; }
+    .preset-card h3 { font-size: 14px; color: #f5c842; margin-bottom: 6px; }
+    .preset-card p { font-size: 12px; color: #8b7a60; line-height: 1.4; }
+
+    /* Rules table */
+    .table-container {
+      background: #1f1a12;
+      border-radius: 8px;
+      border: 1px solid #3b3020;
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      padding: 10px 12px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #8b7a60;
+      background: #1a1510;
+      border-bottom: 1px solid #3b3020;
+    }
+    tbody tr { border-bottom: 1px solid #2a2218; transition: background 0.1s; }
+    tbody tr:hover { background: #2a2218; }
+    tbody td { padding: 8px 12px; font-size: 13px; }
+
+    .rule-active { color: #f59e0b; }
+    .rule-inactive { color: #6b7280; }
+
+    /* Process list */
+    .process-table tbody tr { cursor: default; }
+    .process-bar-bg {
+      width: 60px; height: 4px;
+      background: #2a2218;
+      border-radius: 2px;
+      overflow: hidden;
+      display: inline-block;
+      vertical-align: middle;
+      margin-left: 6px;
+    }
+    .process-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 100;
+    }
+    .modal-overlay.open { display: flex; align-items: center; justify-content: center; }
+    .modal {
+      background: #1f1a12;
+      border: 1px solid #3b3020;
+      border-radius: 10px;
+      padding: 24px;
+      width: 420px;
+      max-width: 90vw;
+    }
+    .modal h2 { font-size: 16px; margin-bottom: 16px; color: #fff; }
+    .form-row {
+      margin-bottom: 12px;
+    }
+    .form-row label {
+      display: block;
+      font-size: 12px;
+      color: #8b7a60;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .form-row input, .form-row select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #1a1510;
+      border: 1px solid #3b3020;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 13px;
+      outline: none;
+    }
+    .form-row input:focus, .form-row select:focus { border-color: #b45309; }
+    .form-hint { font-size: 11px; color: #6b7280; margin-top: 3px; }
+    .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+    /* Settings */
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+    .setting-label { font-size: 13px; color: #d1c4a0; }
+    .setting-row input[type="number"] {
+      width: 60px; padding: 4px 8px;
+      background: #1a1510; border: 1px solid #3b3020;
+      border-radius: 4px; color: #e0e0e0;
+      font-size: 13px; text-align: center;
+    }
+    .toggle {
+      position: relative; width: 40px; height: 22px; cursor: pointer;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle .slider {
+      position: absolute; inset: 0;
+      background: #374151; border-radius: 22px;
+      transition: 0.2s;
+    }
+    .toggle .slider:before {
+      content: '';
+      position: absolute;
+      height: 16px; width: 16px;
+      left: 3px; bottom: 3px;
+      background: #9ca3af;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle input:checked + .slider { background: #b45309; }
+    .toggle input:checked + .slider:before {
+      transform: translateX(18px);
+      background: #f59e0b;
+    }
+
+    /* Admin warning */
+    .admin-banner {
+      display: none;
+      padding: 8px 14px;
+      background: #7f1d1d;
+      border: 1px solid #991b1b;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: #fca5a5;
+      cursor: pointer;
+    }
+    .admin-banner:hover { background: #991b1b; }
+
+    /* Empty state */
+    .empty-state {
+      text-align: center;
+      padding: 40px 20px;
+      color: #8b7a60;
+    }
+    .empty-state h3 { font-size: 16px; margin-bottom: 8px; color: #d1c4a0; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 20px; right: 20px;
+      background: #3b2a0a;
+      color: #f59e0b;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 999;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.2s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    /* Status bar */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 8px;
+      font-size: 11px;
+      color: #4b4030;
+      padding: 0 4px;
+    }
+
+    /* Branding */
+    .branding {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 11px;
+      color: #3b3020;
+    }
+    .branding a { color: #4b4030; text-decoration: none; }
+    .branding a:hover { color: #8b7a60; }
+  </style>
+</head>
+<body>
+
+  <!-- Admin Banner -->
+  <div class="admin-banner" id="adminBanner" onclick="selfElevate()">
+    Not running as Administrator — some limits may not apply. Click to restart elevated.
+  </div>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <h1>Process Governor</h1>
+      <span class="status-badge status-idle" id="statusBadge">Idle</span>
+    </div>
+    <div class="header-right">
+      <button class="btn btn-danger" onclick="stopAll()" id="stopAllBtn" style="display:none">Stop All</button>
+      <button class="btn-icon" onclick="openSettings()" title="Settings">&#9881;</button>
+    </div>
+  </div>
+
+  <!-- System Stats -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">CPU</div>
+        <div class="stat-value" id="cpuValue">0%</div>
+      </div>
+      <div class="stat-bar-bg"><div class="stat-bar-fill cpu" id="cpuBar" style="width:0%"></div></div>
+    </div>
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">Memory</div>
+        <div class="stat-value" id="memValue">0 / 0 GB</div>
+      </div>
+      <div class="stat-bar-bg"><div class="stat-bar-fill mem" id="memBar" style="width:0%"></div></div>
+    </div>
+    <div class="stat-item">
+      <div>
+        <div class="stat-label">Cores</div>
+        <div class="stat-value" id="coresValue">-</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="rules" onclick="switchTab('rules')">Rules</button>
+    <button class="tab" data-tab="presets" onclick="switchTab('presets')">Presets</button>
+    <button class="tab" data-tab="processes" onclick="switchTab('processes')">Processes</button>
+  </div>
+
+  <!-- Rules Panel -->
+  <div class="panel active" id="panel-rules">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <span style="font-size:13px;color:#8b7a60;" id="rulesCount">0 rules</span>
+      <button class="btn btn-primary" onclick="openRuleModal()">+ New Rule</button>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Name</th>
+            <th>Process</th>
+            <th>CPU Limit</th>
+            <th>Memory Limit</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rulesTable"></tbody>
+      </table>
+      <div class="empty-state" id="rulesEmpty" style="display:none;">
+        <h3>No rules yet</h3>
+        <p>Create a rule or apply a preset to start limiting processes.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Presets Panel -->
+  <div class="panel" id="panel-presets">
+    <p style="font-size:13px;color:#8b7a60;margin-bottom:12px;">One-click profiles to limit common resource hogs.</p>
+    <div class="preset-grid" id="presetGrid"></div>
+  </div>
+
+  <!-- Processes Panel -->
+  <div class="panel" id="panel-processes">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <span style="font-size:13px;color:#8b7a60;">Top processes by CPU time</span>
+      <button class="btn btn-ghost" onclick="refreshProcesses()">Refresh</button>
+    </div>
+    <div class="table-container process-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Process</th>
+            <th>PID</th>
+            <th>CPU Time (s)</th>
+            <th>Memory (MB)</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="processTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <span id="lastRefresh">Last refresh: --</span>
+    <span id="autoRefreshLabel">Auto-refresh: 3s</span>
+  </div>
+
+  <!-- Branding -->
+  <div class="branding">
+    Powered by <a href="https://cloudnimbusllc.com" target="_blank">Cloud Nimbus LLC</a>
+  </div>
+
+  <!-- Rule Modal -->
+  <div class="modal-overlay" id="ruleModal">
+    <div class="modal">
+      <h2 id="ruleModalTitle">New Rule</h2>
+      <div class="form-row">
+        <label>Rule Name</label>
+        <input type="text" id="ruleName" placeholder="e.g. Limit Node.js">
+      </div>
+      <div class="form-row">
+        <label>Process Name (without .exe)</label>
+        <input type="text" id="ruleProcess" placeholder="e.g. node">
+        <div class="form-hint">Match by process name as shown in Task Manager</div>
+      </div>
+      <div class="form-row">
+        <label>CPU Limit (%)</label>
+        <input type="number" id="ruleCpu" min="5" max="100" value="50" step="5">
+        <div class="form-hint">Restricts which CPU cores the process can use (5-100%)</div>
+      </div>
+      <div class="form-row">
+        <label>Memory Limit (MB) — 0 = no limit</label>
+        <input type="number" id="ruleMemory" min="0" value="0" step="128">
+        <div class="form-hint">Sets max working set size for the process</div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="closeRuleModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveRule()">Save Rule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-overlay" id="settingsModal">
+    <div class="modal">
+      <h2>Settings</h2>
+      <div class="setting-row">
+        <span class="setting-label">Auto-refresh interval (seconds)</span>
+        <input type="number" id="settRefresh" min="1" max="60" value="3">
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Auto-apply rules on launch</span>
+        <label class="toggle">
+          <input type="checkbox" id="settAutoApply" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">Start minimized to tray</span>
+        <label class="toggle">
+          <input type="checkbox" id="settMinimized">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="closeSettings()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+<script>
+  // --- State ---
+  let rules = [];
+  let activeRuleIds = [];
+  let processes = [];
+  let presets = {};
+  let refreshTimer = null;
+  let editingRuleId = null;
+
+  // --- Init ---
+  async function init() {
+    // Check admin
+    const isAdmin = await window.api.checkAdmin();
+    if (!isAdmin) {
+      document.getElementById('adminBanner').style.display = 'block';
+    }
+
+    const settings = await window.api.getSettings();
+    startAutoRefresh(settings.refreshInterval || 3);
+
+    presets = await window.api.getPresets();
+    renderPresets();
+
+    await refresh();
+
+    // Listen for rule changes from main process
+    window.api.onRulesChanged((ids) => {
+      activeRuleIds = ids;
+      renderRules();
+      updateStatus();
+    });
+  }
+
+  async function refresh() {
+    rules = await window.api.getRules();
+    activeRuleIds = await window.api.getActiveRules();
+    renderRules();
+    updateStatus();
+    updateSystemStats();
+    document.getElementById('lastRefresh').textContent = 'Last refresh: ' + new Date().toLocaleTimeString();
+  }
+
+  function startAutoRefresh(seconds) {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      updateSystemStats();
+    }, seconds * 1000);
+    document.getElementById('autoRefreshLabel').textContent = `Auto-refresh: ${seconds}s`;
+  }
+
+  // --- System Stats ---
+  async function updateSystemStats() {
+    const stats = await window.api.getSystemStats();
+    const cpuEl = document.getElementById('cpuValue');
+    cpuEl.textContent = stats.CPU + '%';
+    cpuEl.className = 'stat-value' + (stats.CPU > 80 ? ' warn' : '');
+    document.getElementById('cpuBar').style.width = stats.CPU + '%';
+
+    const usedMem = (stats.TotalMemGB - stats.FreeMemGB).toFixed(1);
+    const memPercent = stats.TotalMemGB > 0 ? ((usedMem / stats.TotalMemGB) * 100).toFixed(0) : 0;
+    const memEl = document.getElementById('memValue');
+    memEl.textContent = `${usedMem} / ${stats.TotalMemGB} GB`;
+    memEl.className = 'stat-value' + (memPercent > 85 ? ' warn' : '');
+    document.getElementById('memBar').style.width = memPercent + '%';
+
+    document.getElementById('coresValue').textContent = stats.Cores || '-';
+  }
+
+  // --- Status ---
+  function updateStatus() {
+    const badge = document.getElementById('statusBadge');
+    const stopBtn = document.getElementById('stopAllBtn');
+    if (activeRuleIds.length > 0) {
+      badge.textContent = `${activeRuleIds.length} active`;
+      badge.className = 'status-badge status-active';
+      stopBtn.style.display = '';
+    } else {
+      badge.textContent = 'Idle';
+      badge.className = 'status-badge status-idle';
+      stopBtn.style.display = 'none';
+    }
+  }
+
+  // --- Tabs ---
+  function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
+    if (tab === 'processes') refreshProcesses();
+  }
+
+  // --- Rules ---
+  function renderRules() {
+    const tbody = document.getElementById('rulesTable');
+    const empty = document.getElementById('rulesEmpty');
+    document.getElementById('rulesCount').textContent = `${rules.length} rule${rules.length !== 1 ? 's' : ''}`;
+
+    if (rules.length === 0) {
+      tbody.innerHTML = '';
+      empty.style.display = '';
+      return;
+    }
+    empty.style.display = 'none';
+
+    tbody.innerHTML = rules.map(r => {
+      const isActive = activeRuleIds.includes(r.id);
+      return `<tr>
+        <td>
+          <span class="${isActive ? 'rule-active' : 'rule-inactive'}" style="font-weight:600">
+            ${isActive ? '&#9679; Active' : '&#9675; Stopped'}
+          </span>
+        </td>
+        <td style="font-weight:500;color:#d1c4a0">${esc(r.name)}</td>
+        <td style="font-family:monospace;color:#f59e0b">${esc(r.processName)}</td>
+        <td>${r.cpuPercent < 100 ? r.cpuPercent + '%' : '<span style="color:#6b7280">None</span>'}</td>
+        <td>${r.memoryMb > 0 ? r.memoryMb + ' MB' : '<span style="color:#6b7280">None</span>'}</td>
+        <td>
+          <div style="display:flex;gap:4px;">
+            ${isActive
+              ? `<button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="toggleRule('${r.id}', false)">Stop</button>`
+              : `<button class="btn btn-success" style="padding:4px 10px;font-size:12px" onclick="toggleRule('${r.id}', true)">Start</button>`
+            }
+            <button class="btn-icon" onclick="editRule('${r.id}')" title="Edit">&#9998;</button>
+            <button class="btn-icon" style="color:#f87171" onclick="deleteRule('${r.id}', '${esc(r.name)}')" title="Delete">&#10005;</button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function toggleRule(id, start) {
+    if (start) {
+      await window.api.startRule(id);
+      showToast('Rule started');
+    } else {
+      await window.api.stopRule(id);
+      showToast('Rule stopped');
+    }
+    activeRuleIds = await window.api.getActiveRules();
+    renderRules();
+    updateStatus();
+  }
+
+  async function stopAll() {
+    await window.api.stopAllRules();
+    activeRuleIds = [];
+    renderRules();
+    updateStatus();
+    showToast('All rules stopped');
+  }
+
+  async function deleteRule(id, name) {
+    if (!confirm(`Delete rule "${name}"?`)) return;
+    await window.api.removeRule(id);
+    rules = await window.api.getRules();
+    activeRuleIds = await window.api.getActiveRules();
+    renderRules();
+    updateStatus();
+    showToast('Rule deleted');
+  }
+
+  // --- Rule Modal ---
+  function openRuleModal(ruleId) {
+    editingRuleId = ruleId || null;
+    const modal = document.getElementById('ruleModal');
+    const title = document.getElementById('ruleModalTitle');
+
+    if (ruleId) {
+      const r = rules.find(x => x.id === ruleId);
+      if (!r) return;
+      title.textContent = 'Edit Rule';
+      document.getElementById('ruleName').value = r.name;
+      document.getElementById('ruleProcess').value = r.processName;
+      document.getElementById('ruleCpu').value = r.cpuPercent || 50;
+      document.getElementById('ruleMemory').value = r.memoryMb || 0;
+    } else {
+      title.textContent = 'New Rule';
+      document.getElementById('ruleName').value = '';
+      document.getElementById('ruleProcess').value = '';
+      document.getElementById('ruleCpu').value = 50;
+      document.getElementById('ruleMemory').value = 0;
+    }
+    modal.classList.add('open');
+    setTimeout(() => document.getElementById('ruleName').focus(), 50);
+  }
+
+  function editRule(id) { openRuleModal(id); }
+
+  function closeRuleModal() {
+    document.getElementById('ruleModal').classList.remove('open');
+    editingRuleId = null;
+  }
+
+  async function saveRule() {
+    const name = document.getElementById('ruleName').value.trim();
+    const processName = document.getElementById('ruleProcess').value.trim();
+    const cpuPercent = parseInt(document.getElementById('ruleCpu').value) || 50;
+    const memoryMb = parseInt(document.getElementById('ruleMemory').value) || 0;
+
+    if (!name || !processName) {
+      showToast('Name and process are required');
+      return;
+    }
+
+    const rule = { name, processName, cpuPercent, memoryMb };
+    if (editingRuleId) rule.id = editingRuleId;
+
+    await window.api.saveRule(rule);
+    rules = await window.api.getRules();
+    renderRules();
+    closeRuleModal();
+    showToast(editingRuleId ? 'Rule updated' : 'Rule created');
+  }
+
+  // --- Presets ---
+  function renderPresets() {
+    const grid = document.getElementById('presetGrid');
+    const descriptions = {
+      'claude-light': 'Limit node.exe to 75% CPU. Keeps Claude Code running but leaves headroom.',
+      'claude-strict': 'Limit node.exe to 50% CPU + 2GB RAM, git to 50% CPU. Hard cap for heavy sessions.',
+      'build-tools': 'Cap node, msbuild, and cl.exe at 60% CPU. Keep your machine usable during builds.',
+      'background-apps': 'Limit OneDrive (25%), Teams (50%), Slack (50%). Stop background apps from stealing resources.',
+    };
+
+    grid.innerHTML = Object.entries(presets).map(([key, preset]) => {
+      const rulesSummary = preset.rules.map(r =>
+        `${r.processName}: ${r.cpuPercent}% CPU${r.memoryMb ? ', ' + r.memoryMb + 'MB' : ''}`
+      ).join(' / ');
+
+      return `<div class="preset-card" onclick="applyPreset('${key}')">
+        <h3>${esc(preset.name)}</h3>
+        <p>${descriptions[key] || rulesSummary}</p>
+      </div>`;
+    }).join('');
+  }
+
+  async function applyPreset(key) {
+    const result = await window.api.applyPreset(key);
+    if (result.status === 'ok') {
+      rules = await window.api.getRules();
+      activeRuleIds = await window.api.getActiveRules();
+      renderRules();
+      updateStatus();
+      switchTab('rules');
+      showToast('Preset applied');
+    } else {
+      showToast('Error: ' + result.message);
+    }
+  }
+
+  // --- Processes ---
+  async function refreshProcesses() {
+    processes = await window.api.getTopProcesses();
+    const tbody = document.getElementById('processTable');
+
+    tbody.innerHTML = processes.map(p => {
+      const memWidth = Math.min(100, (p.memoryMb / 2048) * 100);
+      return `<tr>
+        <td style="font-weight:500">${esc(p.name)}</td>
+        <td style="font-family:monospace;color:#8b7a60;font-size:12px">${p.pid}</td>
+        <td style="font-family:monospace">${p.cpuTime}s</td>
+        <td>
+          ${p.memoryMb} MB
+          <div class="process-bar-bg">
+            <div class="process-bar-fill" style="width:${memWidth}%;background:${memWidth > 80 ? '#ef4444' : '#8b5cf6'}"></div>
+          </div>
+        </td>
+        <td>
+          <div style="display:flex;gap:4px;">
+            <button class="btn-icon" onclick="quickRule('${esc(p.name)}')" title="Create rule for this process">&#9881;</button>
+            <button class="btn-icon" style="color:#f87171" onclick="killProc(${p.pid}, '${esc(p.name)}')" title="Kill process">&#10005;</button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  function quickRule(processName) {
+    document.getElementById('ruleName').value = `Limit ${processName}`;
+    document.getElementById('ruleProcess').value = processName;
+    document.getElementById('ruleCpu').value = 50;
+    document.getElementById('ruleMemory').value = 0;
+    editingRuleId = null;
+    document.getElementById('ruleModalTitle').textContent = 'New Rule';
+    document.getElementById('ruleModal').classList.add('open');
+  }
+
+  async function killProc(pid, name) {
+    if (!confirm(`Kill ${name} (PID ${pid})?`)) return;
+    const result = await window.api.killProcess(pid);
+    if (result.status === 'ok') {
+      showToast(`Killed ${name}`);
+      setTimeout(refreshProcesses, 500);
+    } else {
+      showToast('Failed: ' + result.message);
+    }
+  }
+
+  // --- Settings ---
+  async function openSettings() {
+    const s = await window.api.getSettings();
+    document.getElementById('settRefresh').value = s.refreshInterval || 3;
+    document.getElementById('settAutoApply').checked = s.autoApplyOnLaunch !== false;
+    document.getElementById('settMinimized').checked = !!s.startMinimized;
+    document.getElementById('settingsModal').classList.add('open');
+  }
+
+  async function saveSettings() {
+    const settings = {
+      refreshInterval: parseInt(document.getElementById('settRefresh').value) || 3,
+      autoApplyOnLaunch: document.getElementById('settAutoApply').checked,
+      startMinimized: document.getElementById('settMinimized').checked,
+    };
+    await window.api.saveSettings(settings);
+    startAutoRefresh(settings.refreshInterval);
+    closeSettings();
+    showToast('Settings saved');
+  }
+
+  function closeSettings() {
+    document.getElementById('settingsModal').classList.remove('open');
+  }
+
+  async function selfElevate() {
+    await window.api.selfElevate();
+  }
+
+  // --- Helpers ---
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/'/g,'&#39;'); }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2000);
+  }
+
+  // Close modals on outside click
+  document.querySelectorAll('.modal-overlay').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target === el) el.classList.remove('open');
+    });
+  });
+
+  // --- Start ---
+  init();
+</script>
+</body>
+</html>

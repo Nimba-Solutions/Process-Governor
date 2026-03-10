@@ -1,0 +1,72 @@
+{
+  "name": "process-governor",
+  "version": "1.0.0",
+  "description": "Free & open-source CPU and memory limiter per-app for Windows",
+  "author": "Cloud Nimbus LLC",
+  "license": "BSL-1.1",
+  "homepage": "https://cloudnimbusllc.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nimba-Solutions/Process-Governor.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win portable",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch"
+  },
+  "build": {
+    "appId": "com.process-governor",
+    "productName": "Process Governor",
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "requestedExecutionLevel": "requireAdministrator",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "ProcessGovernor-${version}.exe"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "icon.png",
+      "node_modules/electron-store/**/*",
+      "node_modules/conf/**/*",
+      "node_modules/atomically/**/*",
+      "node_modules/dot-prop/**/*",
+      "node_modules/env-paths/**/*",
+      "node_modules/json-schema-typed/**/*",
+      "node_modules/type-fest/**/*",
+      "node_modules/ajv/**/*",
+      "node_modules/ajv-formats/**/*",
+      "node_modules/fast-deep-equal/**/*",
+      "node_modules/json-schema-traverse/**/*",
+      "node_modules/uri-js/**/*",
+      "node_modules/punycode/**/*",
+      "node_modules/debounce-fn/**/*",
+      "node_modules/mimic-fn/**/*",
+      "node_modules/semver/**/*",
+      "node_modules/pkg-up/**/*",
+      "node_modules/find-up/**/*",
+      "node_modules/locate-path/**/*",
+      "node_modules/p-locate/**/*",
+      "node_modules/p-limit/**/*",
+      "node_modules/yocto-queue/**/*",
+      "node_modules/path-exists/**/*"
+    ]
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "@jest/globals": "^30.3.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^26.8.1",
+    "jest": "^30.3.0"
+  }
+}
