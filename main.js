@@ -1,13 +1,20 @@
 /**
  * @name         Process Governor
  * @license      BSL 1.1 — See LICENSE.md
- * @description  Electron main process — CPU/memory limiter per-app via Windows Job Objects.
+ * @description  Electron main process — cross-platform CPU/memory limiter per-app.
+ *               Windows: ProcessorAffinity + MaxWorkingSet via PowerShell
+ *               Linux:   taskset / cpulimit + prlimit / cgroups v2
+ *               macOS:   cpulimit (brew) + renice; memory limiting is restricted by the OS
  * @author       Cloud Nimbus LLC
  */
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const { exec, execFile } = require('child_process');
+const os = require('os');
+const fs = require('fs');
 const Store = require('electron-store');
+
+const platform = process.platform; // 'win32', 'darwin', 'linux'
 
 const store = new Store({
   defaults: {
@@ -108,8 +115,11 @@ function createTray() {
   tray.on('double-click', () => createWindow());
 }
 
-// --- PowerShell ---
+// --- Shell helpers ---
 
+/**
+ * Run a PowerShell command (Windows only).
+ */
 function runPowerShell(command) {
   return new Promise((resolve, reject) => {
     const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
@@ -120,9 +130,29 @@ function runPowerShell(command) {
   });
 }
 
+/**
+ * Run a shell command (macOS / Linux).
+ */
+function runShell(command) {
+  return new Promise((resolve, reject) => {
+    exec(command, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout.trim());
+    });
+  });
+}
+
 // --- Process monitoring ---
 
 async function getTopProcesses() {
+  if (platform === 'win32') {
+    return getTopProcessesWindows();
+  }
+  // macOS and Linux both use `ps aux`
+  return getTopProcessesUnix();
+}
+
+async function getTopProcessesWindows() {
   const cmd = `Get-Process | Where-Object { $_.CPU -gt 0 } | Sort-Object CPU -Descending | Select-Object -First 50 Id, ProcessName, CPU, @{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB,1)}}, Path | ConvertTo-Json -Compress`;
   try {
     const raw = await runPowerShell(cmd);
@@ -140,7 +170,50 @@ async function getTopProcesses() {
   }
 }
 
+async function getTopProcessesUnix() {
+  // ps aux columns: USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND
+  // Sort by CPU descending, take top 50
+  try {
+    const raw = await runShell('ps aux --sort=-%cpu 2>/dev/null || ps aux -r');
+    if (!raw) return [];
+    const lines = raw.split('\n');
+    // Skip header line
+    const processes = [];
+    for (let i = 1; i < lines.length && processes.length < 50; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      // Split on whitespace, but COMMAND can contain spaces so limit the split
+      const parts = line.split(/\s+/);
+      if (parts.length < 11) continue;
+      const pid = parseInt(parts[1], 10);
+      const cpuPercent = parseFloat(parts[2]) || 0;
+      const rssMb = Math.round((parseInt(parts[5], 10) || 0) / 1024 * 10) / 10; // RSS is in KB
+      const command = parts.slice(10).join(' ');
+      // Extract the process name from the command path
+      const name = path.basename(command.split(' ')[0]);
+      if (cpuPercent <= 0) continue;
+      processes.push({
+        pid,
+        name,
+        cpuTime: cpuPercent, // on Unix we report current CPU% rather than cumulative time
+        memoryMb: rssMb,
+        path: command.split(' ')[0],
+      });
+    }
+    return processes;
+  } catch (e) {
+    return [];
+  }
+}
+
 async function getSystemStats() {
+  if (platform === 'win32') {
+    return getSystemStatsWindows();
+  }
+  return getSystemStatsUnix();
+}
+
+async function getSystemStatsWindows() {
   const cmd = `$cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $mem = Get-CimInstance Win32_OperatingSystem; @{CPU=[math]::Round($cpu,1);TotalMemGB=[math]::Round($mem.TotalVisibleMemorySize/1MB,1);FreeMemGB=[math]::Round($mem.FreePhysicalMemory/1MB,1);Cores=(Get-CimInstance Win32_Processor).NumberOfLogicalProcessors} | ConvertTo-Json -Compress`;
   try {
     const raw = await runPowerShell(cmd);
@@ -150,24 +223,52 @@ async function getSystemStats() {
   }
 }
 
-// --- CPU Limiting via Process Affinity + Priority ---
-// Windows doesn't have cgroups, so we use two mechanisms:
-// 1. CPU affinity — restrict which cores a process can use
-// 2. Process priority — lower priority so OS schedules it less
-// 3. Periodic suspend/resume for hard caps (aggressive mode)
+async function getSystemStatsUnix() {
+  // Use Node.js os module for cross-platform system info
+  const cores = os.cpus().length;
+  const totalMemGB = Math.round(os.totalmem() / (1024 * 1024 * 1024) * 10) / 10;
+  const freeMemGB = Math.round(os.freemem() / (1024 * 1024 * 1024) * 10) / 10;
+
+  // Get CPU load percentage from os.loadavg (1-minute average, normalized to core count)
+  const loadAvg1m = os.loadavg()[0];
+  const cpuPercent = Math.round((loadAvg1m / cores) * 100 * 10) / 10;
+
+  return {
+    CPU: Math.min(cpuPercent, 100),
+    TotalMemGB: totalMemGB,
+    FreeMemGB: freeMemGB,
+    Cores: cores,
+  };
+}
+
+// --- CPU Limiting ---
+// Windows: ProcessorAffinity + PriorityClass via PowerShell
+// Linux:   taskset for CPU affinity (direct equivalent of ProcessorAffinity)
+//          Also supports cpulimit for percentage-based throttling
+// macOS:   CPU affinity is NOT supported by the OS.
+//          Uses cpulimit (brew install cpulimit) for percentage-based throttling.
+//          Falls back to renice for priority-based soft limiting.
 
 async function applyCpuLimit(processName, cpuPercent) {
-  const cores = require('os').cpus().length;
-  // Calculate how many cores to allow based on percentage
+  if (platform === 'win32') {
+    return applyCpuLimitWindows(processName, cpuPercent);
+  }
+  if (platform === 'linux') {
+    return applyCpuLimitLinux(processName, cpuPercent);
+  }
+  // darwin
+  return applyCpuLimitMac(processName, cpuPercent);
+}
+
+async function applyCpuLimitWindows(processName, cpuPercent) {
+  const cores = os.cpus().length;
   const allowedCores = Math.max(1, Math.round(cores * (cpuPercent / 100)));
 
-  // Build affinity mask (enable first N cores)
   let mask = 0;
   for (let i = 0; i < allowedCores; i++) {
     mask |= (1 << i);
   }
 
-  // Set affinity + lower priority for all matching processes
   const cmd = `Get-Process -Name '${processName}' -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessorAffinity = ${mask}; $_.PriorityClass = 'BelowNormal' }`;
   try {
     await runPowerShell(cmd);
@@ -177,9 +278,127 @@ async function applyCpuLimit(processName, cpuPercent) {
   }
 }
 
+async function applyCpuLimitLinux(processName, cpuPercent) {
+  const cores = os.cpus().length;
+  const allowedCores = Math.max(1, Math.round(cores * (cpuPercent / 100)));
+
+  // Build affinity mask (enable first N cores) — same concept as Windows ProcessorAffinity
+  let mask = 0;
+  for (let i = 0; i < allowedCores; i++) {
+    mask |= (1 << i);
+  }
+  const hexMask = '0x' + mask.toString(16);
+
+  try {
+    // Find all PIDs matching the process name
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    if (pids.length === 0) {
+      return { status: 'ok', allowedCores, totalCores: cores, mask, note: 'No matching processes found' };
+    }
+
+    const errors = [];
+    for (const pid of pids) {
+      try {
+        // taskset is the direct Linux equivalent of Windows ProcessorAffinity
+        await runShell(`taskset -p ${hexMask} ${pid.trim()}`);
+        // Also lower the priority (renice)
+        await runShell(`renice +10 -p ${pid.trim()} 2>/dev/null || true`);
+      } catch (e) {
+        errors.push(`PID ${pid}: ${e.message}`);
+      }
+    }
+
+    if (errors.length > 0 && errors.length === pids.length) {
+      return { status: 'error', message: errors.join('; ') };
+    }
+    return { status: 'ok', allowedCores, totalCores: cores, mask };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function applyCpuLimitMac(processName, cpuPercent) {
+  // macOS does NOT support CPU affinity (the OS does not expose per-process core pinning).
+  // Strategy:
+  //   1. Try cpulimit (brew install cpulimit) for percentage-based throttling
+  //   2. Fall back to renice for soft priority-based limiting
+  const cores = os.cpus().length;
+  // cpulimit -l expects percentage of a single core, so 50% of 8 cores = 400%
+  // But we want cpuPercent to mean "percentage of total system CPU", so scale accordingly
+  const cpulimitPercent = Math.max(1, Math.round(cpuPercent * cores));
+
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    if (pids.length === 0) {
+      return { status: 'ok', totalCores: cores, note: 'No matching processes found' };
+    }
+
+    // Check if cpulimit is available
+    let hasCpulimit = false;
+    try {
+      await runShell('which cpulimit');
+      hasCpulimit = true;
+    } catch (_) { /* not installed */ }
+
+    const results = [];
+    for (const pid of pids) {
+      const trimmedPid = pid.trim();
+      if (hasCpulimit) {
+        try {
+          // Kill any existing cpulimit for this PID first
+          await runShell(`pkill -f 'cpulimit.*-p ${trimmedPid}' 2>/dev/null || true`);
+          // Launch cpulimit in background — it will throttle the process continuously
+          // Using per-core percentage: cpulimit -l <percent> -p <pid> -b (background)
+          const perProcessLimit = Math.max(1, Math.round(cpuPercent));
+          await runShell(`cpulimit -p ${trimmedPid} -l ${perProcessLimit} -b 2>/dev/null`);
+          results.push({ pid: trimmedPid, method: 'cpulimit' });
+        } catch (e) {
+          // Fall back to renice
+          await runShell(`renice +10 -p ${trimmedPid} 2>/dev/null || true`);
+          results.push({ pid: trimmedPid, method: 'renice', note: 'cpulimit failed, used renice' });
+        }
+      } else {
+        // No cpulimit available, use renice as a soft alternative
+        await runShell(`renice +10 -p ${trimmedPid} 2>/dev/null || true`);
+        results.push({ pid: trimmedPid, method: 'renice' });
+      }
+    }
+
+    return {
+      status: 'ok',
+      totalCores: cores,
+      method: hasCpulimit ? 'cpulimit' : 'renice',
+      note: hasCpulimit
+        ? undefined
+        : 'CPU affinity not supported on macOS. Using renice for priority-based limiting. Install cpulimit (brew install cpulimit) for percentage-based throttling.',
+      results,
+    };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+// --- Memory Limiting ---
+// Windows: MaxWorkingSet via PowerShell
+// Linux:   prlimit --as=<bytes> for existing processes (simpler than cgroups)
+//          Alternatively cgroups v2: /sys/fs/cgroup/pg/<name>/memory.max
+// macOS:   Very limited. ulimit -v only works for new processes, cannot limit existing ones.
+//          This is an OS-level limitation. The return data includes a note for the UI.
+
 async function applyMemoryLimit(processName, memoryMb) {
-  // Windows Job Objects for memory limits via PowerShell
-  // We use a simpler approach: set max working set size
+  if (platform === 'win32') {
+    return applyMemoryLimitWindows(processName, memoryMb);
+  }
+  if (platform === 'linux') {
+    return applyMemoryLimitLinux(processName, memoryMb);
+  }
+  // darwin
+  return applyMemoryLimitMac(processName, memoryMb);
+}
+
+async function applyMemoryLimitWindows(processName, memoryMb) {
   const bytes = memoryMb * 1024 * 1024;
   const cmd = `Get-Process -Name '${processName}' -ErrorAction SilentlyContinue | ForEach-Object { $_.MaxWorkingSet = ${bytes} }`;
   try {
@@ -190,14 +409,114 @@ async function applyMemoryLimit(processName, memoryMb) {
   }
 }
 
+async function applyMemoryLimitLinux(processName, memoryMb) {
+  // Use prlimit to set address space limit on existing processes.
+  // prlimit --pid <pid> --as=<bytes> is simpler than cgroups and doesn't require cgroup setup.
+  const bytes = memoryMb * 1024 * 1024;
+
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    if (pids.length === 0) {
+      return { status: 'ok', note: 'No matching processes found' };
+    }
+
+    const errors = [];
+    for (const pid of pids) {
+      try {
+        await runShell(`prlimit --pid ${pid.trim()} --as=${bytes}`);
+      } catch (e) {
+        errors.push(`PID ${pid}: ${e.message}`);
+      }
+    }
+
+    if (errors.length > 0 && errors.length === pids.length) {
+      return { status: 'error', message: errors.join('; ') };
+    }
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function applyMemoryLimitMac(processName, memoryMb) {
+  // macOS limitation: there is no reliable way to limit memory of an already-running process.
+  // - ulimit -v only applies to new child processes, not existing ones.
+  // - There are no cgroups on macOS.
+  // - There is no prlimit equivalent.
+  // We return a warning so the UI can display the limitation to the user.
+  return {
+    status: 'unsupported',
+    message: 'Memory limiting for existing processes is not supported on macOS. '
+      + 'The OS does not provide an API to cap memory of running processes. '
+      + 'ulimit -v only applies to newly spawned child processes.',
+    note: 'macOS does not support memory limits on running processes.',
+  };
+}
+
+// --- Reset / remove limits ---
+
 async function resetProcessLimits(processName) {
-  const cores = require('os').cpus().length;
+  if (platform === 'win32') {
+    return resetProcessLimitsWindows(processName);
+  }
+  if (platform === 'linux') {
+    return resetProcessLimitsLinux(processName);
+  }
+  return resetProcessLimitsMac(processName);
+}
+
+async function resetProcessLimitsWindows(processName) {
+  const cores = os.cpus().length;
   let fullMask = 0;
   for (let i = 0; i < cores; i++) fullMask |= (1 << i);
 
   const cmd = `Get-Process -Name '${processName}' -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessorAffinity = ${fullMask}; $_.PriorityClass = 'Normal' }`;
   try {
     await runPowerShell(cmd);
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function resetProcessLimitsLinux(processName) {
+  const cores = os.cpus().length;
+  let fullMask = 0;
+  for (let i = 0; i < cores; i++) fullMask |= (1 << i);
+  const hexMask = '0x' + fullMask.toString(16);
+
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    for (const pid of pids) {
+      const trimmedPid = pid.trim();
+      // Restore full CPU affinity
+      await runShell(`taskset -p ${hexMask} ${trimmedPid} 2>/dev/null || true`);
+      // Restore normal priority
+      await runShell(`renice 0 -p ${trimmedPid} 2>/dev/null || true`);
+      // Remove prlimit memory restriction (set to unlimited)
+      await runShell(`prlimit --pid ${trimmedPid} --as=unlimited 2>/dev/null || true`);
+    }
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+}
+
+async function resetProcessLimitsMac(processName) {
+  try {
+    const pidOutput = await runShell(`pgrep -x '${processName}' 2>/dev/null || true`);
+    const pids = pidOutput.split('\n').filter(p => p.trim());
+    for (const pid of pids) {
+      const trimmedPid = pid.trim();
+      // Kill any cpulimit processes targeting this PID
+      await runShell(`pkill -f 'cpulimit.*-p ${trimmedPid}' 2>/dev/null || true`);
+      // Restore normal priority
+      await runShell(`renice 0 -p ${trimmedPid} 2>/dev/null || true`);
+    }
+    // Also kill any cpulimit targeting by name (belt and suspenders)
+    await runShell(`pkill -f 'cpulimit.*${processName}' 2>/dev/null || true`);
     return { status: 'ok' };
   } catch (e) {
     return { status: 'error', message: e.message };
@@ -292,6 +611,14 @@ const PRESETS = {
 
 ipcMain.handle('get-top-processes', () => getTopProcesses());
 ipcMain.handle('get-system-stats', () => getSystemStats());
+ipcMain.handle('get-platform-info', () => ({
+  platform,
+  arch: process.arch,
+  cpuAffinitySupported: platform !== 'darwin',
+  memoryLimitSupported: platform !== 'darwin',
+  cores: os.cpus().length,
+  totalMemGB: Math.round(os.totalmem() / (1024 * 1024 * 1024) * 10) / 10,
+}));
 
 ipcMain.handle('get-rules', () => store.get('rules', []));
 ipcMain.handle('get-active-rules', () => getActiveRuleIds());
@@ -386,7 +713,11 @@ ipcMain.handle('save-settings', (_, settings) => {
 
 ipcMain.handle('kill-process', async (_, pid) => {
   try {
-    await runPowerShell(`Stop-Process -Id ${pid} -Force -ErrorAction Stop`);
+    if (platform === 'win32') {
+      await runPowerShell(`Stop-Process -Id ${pid} -Force -ErrorAction Stop`);
+    } else {
+      await runShell(`kill -9 ${pid}`);
+    }
     return { status: 'ok' };
   } catch (e) {
     return { status: 'error', message: e.message };
@@ -395,10 +726,20 @@ ipcMain.handle('kill-process', async (_, pid) => {
 
 ipcMain.handle('check-admin', async () => {
   try {
-    const result = await runPowerShell(
-      `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`
-    );
-    return result === 'True';
+    if (platform === 'win32') {
+      const result = await runPowerShell(
+        `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`
+      );
+      return result === 'True';
+    }
+    if (platform === 'darwin') {
+      // Check if user is in the admin group
+      const result = await runShell('id -Gn');
+      return result.split(/\s+/).includes('admin');
+    }
+    // Linux: check if running as root
+    const result = await runShell('id -u');
+    return result.trim() === '0';
   } catch (e) {
     return false;
   }
@@ -408,9 +749,19 @@ ipcMain.handle('self-elevate', async () => {
   const exePath = process.execPath;
   const appPath = app.getAppPath();
   try {
-    await runPowerShell(
-      `Start-Process '${exePath}' -ArgumentList '"${appPath}"' -Verb RunAs`
-    );
+    if (platform === 'win32') {
+      await runPowerShell(
+        `Start-Process '${exePath}' -ArgumentList '"${appPath}"' -Verb RunAs`
+      );
+    } else if (platform === 'darwin') {
+      // Use osascript to prompt for admin privileges on macOS
+      await runShell(
+        `osascript -e 'do shell script "\\\"${exePath}\\\" \\\"${appPath}\\\" &" with administrator privileges'`
+      );
+    } else {
+      // Linux: use pkexec for graphical privilege escalation
+      await runShell(`pkexec "${exePath}" "${appPath}" &`);
+    }
     app.isQuitting = true;
     app.quit();
     return { status: 'ok' };
@@ -418,6 +769,98 @@ ipcMain.handle('self-elevate', async () => {
     return { status: 'error', message: e.message };
   }
 });
+
+ipcMain.handle('set-auto-start', async (_, enabled) => {
+  try {
+    if (platform === 'win32') {
+      return await setAutoStartWindows(enabled);
+    }
+    if (platform === 'darwin') {
+      return await setAutoStartMac(enabled);
+    }
+    return await setAutoStartLinux(enabled);
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+});
+
+// --- Auto-start helpers ---
+
+async function setAutoStartWindows(enabled) {
+  const exePath = process.execPath;
+  if (enabled) {
+    await runPowerShell(
+      `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ProcessGovernor' -Value '"${exePath}"'`
+    );
+  } else {
+    await runPowerShell(
+      `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ProcessGovernor' -ErrorAction SilentlyContinue`
+    );
+  }
+  return { status: 'ok' };
+}
+
+async function setAutoStartMac(enabled) {
+  const plistName = 'com.cloudnimbus.process-governor';
+  const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${plistName}.plist`);
+  const exePath = process.execPath;
+
+  if (enabled) {
+    const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${plistName}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${exePath}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>`;
+    // Ensure LaunchAgents directory exists
+    const dir = path.dirname(plistPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(plistPath, plistContent, 'utf-8');
+  } else {
+    if (fs.existsSync(plistPath)) {
+      fs.unlinkSync(plistPath);
+    }
+  }
+  return { status: 'ok' };
+}
+
+async function setAutoStartLinux(enabled) {
+  const desktopName = 'process-governor';
+  const autostartDir = path.join(os.homedir(), '.config', 'autostart');
+  const desktopPath = path.join(autostartDir, `${desktopName}.desktop`);
+  const exePath = process.execPath;
+
+  if (enabled) {
+    const desktopContent = `[Desktop Entry]
+Type=Application
+Name=Process Governor
+Exec="${exePath}"
+X-GNOME-Autostart-enabled=true
+Hidden=false
+NoDisplay=false
+Comment=CPU and memory limiter
+`;
+    if (!fs.existsSync(autostartDir)) {
+      fs.mkdirSync(autostartDir, { recursive: true });
+    }
+    fs.writeFileSync(desktopPath, desktopContent, 'utf-8');
+  } else {
+    if (fs.existsSync(desktopPath)) {
+      fs.unlinkSync(desktopPath);
+    }
+  }
+  return { status: 'ok' };
+}
 
 // --- App lifecycle ---
 
