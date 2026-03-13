@@ -10,6 +10,7 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const { exec, execFile } = require('child_process');
+const guard = require('./process-guard');
 const os = require('os');
 const fs = require('fs');
 const Store = require('electron-store');
@@ -121,25 +122,15 @@ function createTray() {
  * Run a PowerShell command (Windows only).
  */
 function runPowerShell(command) {
-  return new Promise((resolve, reject) => {
-    const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
-    exec(psCmd, { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim());
-    });
-  });
+  const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${command.replace(/"/g, '\\"')}"`;
+  return guard.execPromise(psCmd).then(s => (s || '').trim());
 }
 
 /**
  * Run a shell command (macOS / Linux).
  */
 function runShell(command) {
-  return new Promise((resolve, reject) => {
-    exec(command, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout.trim());
-    });
-  });
+  return guard.execPromise(command).then(s => (s || '').trim());
 }
 
 // --- Process monitoring ---
@@ -862,9 +853,27 @@ Comment=CPU and memory limiter
   return { status: 'ok' };
 }
 
+// --- Single instance lock ---
+
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
+  });
+}
+
 // --- App lifecycle ---
 
+if (gotLock) {
 app.whenReady().then(async () => {
+  guard.init(app);
   createTray();
 
   const settings = store.get('settings');
@@ -883,9 +892,10 @@ app.whenReady().then(async () => {
     createWindow();
   }
 });
+}
 
 app.on('window-all-closed', () => { /* keep running in tray */ });
-app.on('activate', () => createWindow());
+app.on('activate', () => { if (gotLock) createWindow(); });
 app.on('before-quit', () => {
   app.isQuitting = true;
   stopAllRules();
